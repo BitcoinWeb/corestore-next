@@ -1,24 +1,24 @@
 const { EventEmitter } = require('events')
 const safetyCatch = require('safety-catch')
-const crypto = require('hypercore-crypto')
+const crypto = require('@web4/bitweb-crypto')
 const sodium = require('sodium-universal')
-const Hypercore = require('hypercore')
+const Unichain = require('@web4/unichain')
 
 const KeyManager = require('./lib/keys')
 
-const CORES_DIR = 'cores'
+const CHAINS_DIR = 'chains'
 const PROFILES_DIR = 'profiles'
-const USERDATA_NAME_KEY = '@corestore/name'
-const USERDATA_NAMESPACE_KEY = '@corestore/namespace'
-const DEFAULT_NAMESPACE = generateNamespace('@corestore/default')
+const USERDATA_NAME_KEY = '@chainstore/name'
+const USERDATA_NAMESPACE_KEY = '@chainstore/namespace'
+const DEFAULT_NAMESPACE = generateNamespace('@chainstore/default')
 
-module.exports = class Corestore extends EventEmitter {
+module.exports = class Chainstore extends EventEmitter {
   constructor (storage, opts = {}) {
     super()
 
-    this.storage = Hypercore.defaultStorage(storage, { lock: PROFILES_DIR + '/default' })
+    this.storage = Unichain.defaultStorage(storage, { lock: PROFILES_DIR + '/default' })
 
-    this.cores = opts._cores || new Map()
+    this.chains = opts._chains || new Map()
     this.keys = opts.keys
 
     this._namespace = opts._namespace || DEFAULT_NAMESPACE
@@ -55,7 +55,7 @@ module.exports = class Corestore extends EventEmitter {
         discoveryKey: crypto.discoveryKey(opts.publicKey)
       }
     }
-    const { publicKey, sign } = await this.keys.createHypercoreKeyPair(opts.name, this._namespace)
+    const { publicKey, sign } = await this.keys.createUnichainKeyPair(opts.name, this._namespace)
     return {
       keyPair: {
         publicKey,
@@ -66,25 +66,25 @@ module.exports = class Corestore extends EventEmitter {
     }
   }
 
-  _getPrereadyUserData (core, key) {
-    for (const { key: savedKey, value } of core.core.header.userData) {
+  _getPrereadyUserData (chain, key) {
+    for (const { key: savedKey, value } of chain.chain.header.userData) {
       if (key === savedKey) return value
     }
     return null
   }
 
-  async _preready (core) {
-    const name = this._getPrereadyUserData(core, USERDATA_NAME_KEY)
+  async _preready (chain) {
+    const name = this._getPrereadyUserData(chain, USERDATA_NAME_KEY)
     if (!name) return
 
-    const namespace = this._getPrereadyUserData(core, USERDATA_NAMESPACE_KEY)
-    const { publicKey, sign } = await this.keys.createHypercoreKeyPair(name.toString(), namespace)
-    if (!publicKey.equals(core.key)) throw new Error('Stored core key does not match the provided name')
+    const namespace = this._getPrereadyUserData(chain, USERDATA_NAMESPACE_KEY)
+    const { publicKey, sign } = await this.keys.createUnichainKeyPair(name.toString(), namespace)
+    if (!publicKey.equals(chain.key)) throw new Error('Stored chain key does not match the provided name')
 
-    // TODO: Should Hypercore expose a helper for this, or should preready return keypair/sign?
-    core.sign = sign
-    core.key = publicKey
-    core.writable = true
+    // TODO: Should Unichain expose a helper for this, or should preready return keypair/sign?
+    chain.sign = sign
+    chain.key = publicKey
+    chain.writable = true
   }
 
   async _preload (opts) {
@@ -93,8 +93,8 @@ module.exports = class Corestore extends EventEmitter {
     const { discoveryKey, keyPair, sign } = await this._generateKeys(opts)
     const id = discoveryKey.toString('hex')
 
-    while (this.cores.has(id)) {
-      const existing = this.cores.get(id)
+    while (this.chains.has(id)) {
+      const existing = this.chains.get(id)
       if (existing.opened && !existing.closing) return { from: existing, keyPair, sign }
       if (!existing.opened) {
         await existing.ready().catch(safetyCatch)
@@ -111,8 +111,8 @@ module.exports = class Corestore extends EventEmitter {
 
     // No more async ticks allowed after this point -- necessary for caching
 
-    const storageRoot = [CORES_DIR, id.slice(0, 2), id.slice(2, 4), id].join('/')
-    const core = new Hypercore(p => this.storage(storageRoot + '/' + p), {
+    const storageRoot = [CHAINS_DIR, id.slice(0, 2), id.slice(2, 4), id].join('/')
+    const chain = new Unichain(p => this.storage(storageRoot + '/' + p), {
       _preready: this._preready.bind(this),
       autoClose: true,
       encryptionKey: opts.encryptionKey || null,
@@ -127,42 +127,42 @@ module.exports = class Corestore extends EventEmitter {
         : null
     })
 
-    this.cores.set(id, core)
-    core.ready().then(() => {
+    this.chains.set(id, chain)
+    chain.ready().then(() => {
       for (const { stream } of this._replicationStreams) {
-        core.replicate(stream)
+        chain.replicate(stream)
       }
     }, () => {
-      this.cores.delete(id)
+      this.chains.delete(id)
     })
-    core.once('close', () => {
-      this.cores.delete(id)
+    chain.once('close', () => {
+      this.chains.delete(id)
     })
 
-    return { from: core, keyPair, sign }
+    return { from: chain, keyPair, sign }
   }
 
   get (opts = {}) {
     opts = validateGetOptions(opts)
-    const core = new Hypercore(null, {
+    const chain = new Unichain(null, {
       ...opts,
       name: null,
       preload: () => this._preload(opts)
     })
-    return core
+    return chain
   }
 
   replicate (isInitiator, opts) {
     const isExternal = isStream(isInitiator) || !!(opts && opts.stream)
-    const stream = Hypercore.createProtocolStream(isInitiator, {
+    const stream = Unichain.createProtocolStream(isInitiator, {
       ...opts,
       ondiscoverykey: discoveryKey => {
-        const core = this.get({ _discoveryKey: discoveryKey })
-        return core.ready().catch(safetyCatch)
+        const chain = this.get({ _discoveryKey: discoveryKey })
+        return chain.ready().catch(safetyCatch)
       }
     })
-    for (const core of this.cores.values()) {
-      if (core.opened) core.replicate(stream) // If the core is not opened, it will be replicated in preload.
+    for (const chain of this.chains.values()) {
+      if (chain.opened) chain.replicate(stream) // If the chain is not opened, it will be replicated in preload.
     }
     const streamRecord = { stream, isExternal }
     this._replicationStreams.push(streamRecord)
@@ -174,10 +174,10 @@ module.exports = class Corestore extends EventEmitter {
 
   namespace (name) {
     if (!Buffer.isBuffer(name)) name = Buffer.from(name)
-    return new Corestore(this.storage, {
+    return new Chainstore(this.storage, {
       _namespace: generateNamespace(this._namespace, name),
       _opening: this._opening,
-      _cores: this.cores,
+      _chains: this.chains,
       _streams: this._replicationStreams,
       keys: this._opening.then(() => this.keys)
     })
@@ -187,12 +187,12 @@ module.exports = class Corestore extends EventEmitter {
     if (this._closing) return this._closing
     await this._opening
     const closePromises = []
-    for (const core of this.cores.values()) {
-      closePromises.push(core.close())
+    for (const chain of this.chains.values()) {
+      closePromises.push(chain.close())
     }
     await Promise.allSettled(closePromises)
     for (const { stream, isExternal } of this._replicationStreams) {
-      // Only close streams that were created by the Corestore
+      // Only close streams that were created by the Chainstore
       if (!isExternal) stream.destroy()
     }
     await this.keys.close()
